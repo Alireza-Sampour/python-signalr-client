@@ -1,2 +1,2 @@
-requests>=2.18.4
-websockets>=4.0.1
+requests>=2.31,<3
+websockets>=14.1,<16
