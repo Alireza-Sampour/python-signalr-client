@@ -23,8 +23,8 @@ class Transport:
         self._connection = connection
         self._ws_params = None
         self._conn_handler = None
-        self.ws_loop = asyncio.new_event_loop()
-        self.invoke_queue = asyncio.Queue()
+        self.ws_loop = None
+        self.invoke_queue = None
         self.ws = None
 
     # ===================================
@@ -32,9 +32,19 @@ class Transport:
 
     def start(self):
         self._ws_params = WebSocketParameters(self._connection)
-        self._connect()
 
-        if not self.ws_loop.is_running():
+        try:
+            # When called from async code (FastAPI, asyncio.run(), Jupyter, etc.),
+            # reuse the caller's running loop instead of trying to run another loop.
+            self.ws_loop = asyncio.get_running_loop()
+            self.invoke_queue = asyncio.Queue()
+            self._connect()
+            return
+        except RuntimeError:
+            # No loop is running in this thread, so this is the synchronous API.
+            self.ws_loop = asyncio.new_event_loop()
+            self.invoke_queue = asyncio.Queue()
+            self._connect()
             self.ws_loop.run_forever()
 
     def send(self, message):
@@ -47,21 +57,27 @@ class Transport:
     # Private Methods
 
     def _schedule(self, coroutine):
-        # Support both calls made before the loop starts and calls from another thread.
+        if self.ws_loop is None:
+            raise RuntimeError("Transport has not been started")
+
         if self.ws_loop.is_running():
             return asyncio.run_coroutine_threadsafe(coroutine, self.ws_loop)
+
         return self.ws_loop.create_task(coroutine)
 
     def _connect(self):
         self._conn_handler = self.ws_loop.create_task(self._socket())
 
     async def _socket(self):
-        async with connect(
-            self._ws_params.socket_url,
-            additional_headers=self._ws_params.headers,
-        ) as self.ws:
-            self._connection.started = True
-            await self._master_handler(self.ws)
+        try:
+            async with connect(
+                self._ws_params.socket_url,
+                additional_headers=self._ws_params.headers,
+            ) as self.ws:
+                self._connection.started = True
+                await self._master_handler(self.ws)
+        finally:
+            self._connection.started = False
 
     async def _master_handler(self, ws):
         consumer_task = asyncio.create_task(self._consumer_handler(ws))
@@ -84,13 +100,10 @@ class Transport:
                     raise exception
 
     async def _consumer_handler(self, ws):
-        try:
-            async for message in ws:
-                if message:
-                    data = loads(message)
-                    await self._connection.received.fire(**data)
-        finally:
-            self._connection.started = False
+        async for message in ws:
+            if message:
+                data = loads(message)
+                await self._connection.received.fire(**data)
 
     async def _producer_handler(self, ws):
         while True:
@@ -103,7 +116,6 @@ class Transport:
                     await ws.send(dumps(event.message))
                 elif event.type == 'CLOSE':
                     await ws.close()
-                    self._connection.started = False
                     return
             finally:
                 self.invoke_queue.task_done()
