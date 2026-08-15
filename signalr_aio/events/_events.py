@@ -7,18 +7,23 @@
 # Structure inspired by https://github.com/TargetProcess/signalr-client-py
 
 
-class EventHook(object):
+class EventHook:
     def __init__(self):
         self._handlers = []
 
     def __iadd__(self, handler):
-        self._handlers.append(handler)
+        if handler not in self._handlers:
+            self._handlers.append(handler)
         return self
 
     def __isub__(self, handler):
-        self._handlers.remove(handler)
+        if handler in self._handlers:
+            self._handlers.remove(handler)
         return self
 
     async def fire(self, *args, **kwargs):
-        for handler in self._handlers:
-            await handler(*args, **kwargs)
+        # Iterate over a snapshot so handlers can safely subscribe/unsubscribe while firing.
+        for handler in tuple(self._handlers):
+            result = handler(*args, **kwargs)
+            if hasattr(result, '__await__'):
+                await result
