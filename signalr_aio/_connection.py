@@ -10,7 +10,7 @@ from .hubs import Hub
 from .transports import Transport
 
 
-class Connection(object):
+class Connection:
     protocol_version = '1.5'
 
     def __init__(self, url, session=None):
@@ -25,30 +25,43 @@ class Connection(object):
         self.started = False
 
         async def handle_error(**data):
-            error = data["E"] if "E" in data else None
+            error = data.get('E')
             if error is not None:
                 await self.error.fire(error)
 
         self.received += handle_error
 
     def start(self):
-        self.hub = [hub_name for hub_name in self.__hubs][0]
+        if not self.__hubs:
+            raise RuntimeError('Cannot start connection without a registered hub.')
+
+        if self.started:
+            return
+
+        self.hub = next(iter(self.__hubs))
         self.__transport.start()
 
     def register_hub(self, name):
-        if name not in self.__hubs:
-            if self.started:
-                raise RuntimeError(
-                    'Cannot create new hub because connection is already started.')
-            self.__hubs[name] = Hub(name, self)
+        if self.started:
+            raise RuntimeError(
+                'Cannot create new hub because connection is already started.')
+
+        if name in self.__hubs:
             return self.__hubs[name]
+
+        hub = Hub(name, self)
+        self.__hubs[name] = hub
+        return hub
 
     def increment_send_counter(self):
         self.__send_counter += 1
         return self.__send_counter
 
     def send(self, message):
+        if not self.started and self.__transport.ws_loop.is_running():
+            raise RuntimeError('Cannot send on a connection that has not started.')
         self.__transport.send(message)
 
     def close(self):
-        self.__transport.close()
+        if self.started:
+            self.__transport.close()
