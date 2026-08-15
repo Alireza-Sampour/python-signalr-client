@@ -5,21 +5,14 @@
 # Stanislav Lazarov
 
 import asyncio
-import inspect
 
 try:
     from ujson import dumps, loads
 except ImportError:
     from json import dumps, loads
 
-# Use the modern asyncio client API available in current websockets releases.
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
-
-try:
-    import uvloop
-except ImportError:
-    uvloop = None
 
 from ._parameters import WebSocketParameters
 from ._queue_events import InvokeEvent, CloseEvent
@@ -30,10 +23,9 @@ class Transport:
         self._connection = connection
         self._ws_params = None
         self._conn_handler = None
-        self.ws_loop = None
-        self.invoke_queue = None
+        self.ws_loop = asyncio.new_event_loop()
+        self.invoke_queue = asyncio.Queue()
         self.ws = None
-        self._set_loop_and_queue()
 
     # ===================================
     # Public Methods
@@ -54,18 +46,8 @@ class Transport:
     # -----------------------------------
     # Private Methods
 
-    def _set_loop_and_queue(self):
-        # Always create an explicit loop instead of relying on get_event_loop().
-        # Python 3.12 no longer guarantees an implicit current loop.
-        self.ws_loop = asyncio.new_event_loop()
-        self.invoke_queue = asyncio.Queue()
-
-        if uvloop is not None:
-            # uvloop must be installed as the loop policy before creating loops.
-            # Keep the explicitly created loop when a caller already configured one.
-            pass
-
     def _schedule(self, coroutine):
+        # Support both calls made before the loop starts and calls from another thread.
         if self.ws_loop.is_running():
             return asyncio.run_coroutine_threadsafe(coroutine, self.ws_loop)
         return self.ws_loop.create_task(coroutine)
@@ -77,7 +59,6 @@ class Transport:
         async with connect(
             self._ws_params.socket_url,
             additional_headers=self._ws_params.headers,
-            proxy=None,
         ) as self.ws:
             self._connection.started = True
             await self._master_handler(self.ws)
@@ -95,7 +76,7 @@ class Transport:
 
         await asyncio.gather(*pending, return_exceptions=True)
 
-        # Propagate an unexpected task failure instead of silently swallowing it.
+        # Propagate unexpected task failures instead of silently swallowing them.
         for task in done:
             if not task.cancelled():
                 exception = task.exception()
